@@ -10,6 +10,7 @@ SCHEDULE = "Расписание"
 ANNOUNCEMENTS = "Объявления"
 CONTACTS = "Контакты"
 FAQ = "Частые вопросы"
+ASK = "Задать вопрос"
 TODAY, TOMORROW, WEEK = "Сегодня", "Завтра", "Неделя"
 TEXT_LIMIT = 3000
 
@@ -20,7 +21,7 @@ class GroupChoice(CallbackData, prefix="group"):
 
 
 def menu() -> ReplyKeyboardMarkup:
-    return keyboard((SCHEDULE, ANNOUNCEMENTS), (CONTACTS, FAQ), (CHANGE_GROUP,))
+    return keyboard((SCHEDULE, ANNOUNCEMENTS), (CONTACTS, FAQ), (ASK, CHANGE_GROUP))
 
 
 def keyboard(*rows: tuple[str, ...]) -> ReplyKeyboardMarkup:

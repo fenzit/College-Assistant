@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatType
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -12,6 +11,7 @@ from aiogram.types import CallbackQuery, Message
 
 from .config import Settings
 from .database import Database
+from .telegram import send_text
 from .ui import ANNOUNCEMENTS, CANCEL, TEXT_LIMIT, GroupChoice, chunks, group_picker, keyboard, menu, text_length
 
 logger = logging.getLogger(__name__)
@@ -35,9 +35,9 @@ class Broadcasts:
         return count
 
     async def run(self, bot: Bot):
-        self.db.recover_deliveries()
         while True:
             try:
+                self.db.recover_deliveries()
                 self.wakeup.clear()
                 announcement = self.db.next_announcement()
                 if announcement is None:
@@ -47,14 +47,13 @@ class Broadcasts:
             except Exception:
                 logger.exception("Ошибка в очереди рассылок")
                 await asyncio.sleep(3)
-                self.db.recover_deliveries()
 
     async def deliver(self, bot, announcement):
         announcement_id = announcement["id"]
         audience = announcement["name"] or "Колледж"
         text = f"Объявление · {audience}\n\n{announcement['text']}"
         while (user_id := self.db.claim_delivery(announcement_id)) is not None:
-            status = await send_announcement(bot, user_id, text)
+            status = await send_text(bot, user_id, text)
             self.db.finish_delivery(announcement_id, user_id, status)
             await asyncio.sleep(0.05)
         counts = self.db.delivery_counts(announcement_id)
@@ -62,25 +61,9 @@ class Broadcasts:
         if counts.get("unknown", 0):
             text += f". Не удалось проверить доставку: {counts['unknown']}."
         try:
-            await send_announcement(bot, announcement["author_id"], text)
+            await send_text(bot, announcement["author_id"], text)
         finally:
             self.db.mark_reported(announcement_id)
-
-
-async def send_announcement(bot: Bot, user_id: int, text: str) -> str:
-    for attempt in range(3):
-        try:
-            await bot.send_message(user_id, text)
-            return "sent"
-        except TelegramRetryAfter as exc:
-            if attempt < 2:
-                await asyncio.sleep(exc.retry_after)
-        except (TelegramForbiddenError, TelegramBadRequest):
-            return "failed"
-        except TelegramAPIError as exc:
-            logger.warning("Telegram не подтвердил отправку: %s", type(exc).__name__)
-            return "unknown"
-    return "failed"
 
 
 def broadcast_router(settings: Settings, db: Database, broadcasts: Broadcasts) -> Router:
@@ -107,7 +90,7 @@ def broadcast_router(settings: Settings, db: Database, broadcasts: Broadcasts) -
             return
         await state.clear()
         await state.set_state(BroadcastFlow.group)
-        await message.answer("Выберите получателей.", reply_markup=keyboard((CANCEL,)))
+        await message.answer("Выйти из рассылки можно кнопкой «Отмена».", reply_markup=keyboard((CANCEL,)))
         await message.answer("Кому отправить объявление?", reply_markup=markup)
 
     @router.callback_query(BroadcastFlow.group, GroupChoice.filter(F.action == "send_page"))

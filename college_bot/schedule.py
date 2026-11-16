@@ -63,7 +63,7 @@ def read_schedule(filename: str, content: bytes) -> Schedule:
         delimiter = ";" if first_line.count(";") > first_line.count(",") else ","
         read_table(csv.reader(StringIO(text, newline=""), delimiter=delimiter), result, "CSV")
     elif suffix == "xlsx":
-        workbook = load_workbook(BytesIO(content), read_only=True, data_only=True)
+        workbook = load_workbook(BytesIO(content), read_only=True, data_only=True, keep_links=False)
         try:
             for sheet in workbook.worksheets:
                 if sheet.sheet_state != "visible":

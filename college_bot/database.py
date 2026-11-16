@@ -73,16 +73,24 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS deliveries_pending ON deliveries(announcement_id, status, user_id);
                 CREATE TABLE IF NOT EXISTS contacts (
-                    id INTEGER PRIMARY KEY,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                     title TEXT NOT NULL,
                     details TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS faq (
-                    id INTEGER PRIMARY KEY,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                     question TEXT NOT NULL,
                     answer TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS questions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    student_id INTEGER NOT NULL REFERENCES users(telegram_id),
+                    assignee_id INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending'
+                );
             """)
+            conn.execute("UPDATE questions SET status = 'unknown' WHERE status = 'replying'")
 
     def register(self, user_id: int, name: str, role: str) -> None:
         with self.connection() as conn:
@@ -255,3 +263,31 @@ class Database:
         query = "DELETE FROM contacts WHERE id = ?" if kind == "contacts" else "DELETE FROM faq WHERE id = ?"
         with self.connection() as conn:
             return conn.execute(query, (item_id,)).rowcount == 1
+
+    def create_question(self, student_id: int, assignee_id: int, text: str) -> int:
+        with self.connection() as conn:
+            return conn.execute("""
+                INSERT INTO questions (student_id, assignee_id, text) VALUES (?, ?, ?)
+            """, (student_id, assignee_id, text)).lastrowid
+
+    def assign_question(self, question_id: int, assignee_id: int) -> None:
+        with self.connection() as conn:
+            conn.execute("UPDATE questions SET assignee_id = ? WHERE id = ?", (assignee_id, question_id))
+
+    def question(self, question_id: int) -> sqlite3.Row | None:
+        with self.connection() as conn:
+            return conn.execute("SELECT * FROM questions WHERE id = ?", (question_id,)).fetchone()
+
+    def discard_question(self, question_id: int) -> None:
+        with self.connection() as conn:
+            conn.execute("DELETE FROM questions WHERE id = ? AND status = 'pending'", (question_id,))
+
+    def claim_reply(self, question_id: int) -> bool:
+        with self.connection() as conn:
+            return conn.execute("""
+                UPDATE questions SET status = 'replying' WHERE id = ? AND status = 'pending'
+            """, (question_id,)).rowcount == 1
+
+    def finish_reply(self, question_id: int, status: str) -> None:
+        with self.connection() as conn:
+            conn.execute("UPDATE questions SET status = ? WHERE id = ?", (status, question_id))
