@@ -28,10 +28,15 @@ SEMESTER_WEEKS = re.compile(
     rf"(?P<weeks>{WEEK_TERM}{WEEK_NOTE}(?:(?:\s*,\s*|(?<=\))\s*){WEEK_TERM}{WEEK_NOTE})*)",
     re.IGNORECASE,
 )
-ROOM_LABEL = r"(?:[0-9]{3,4}[а-я]?|Ц\d+|спортзал(?: \(поток \d+\))?|уточнить|уточняется)"
+ROOM_LABEL = r"(?:[0-9]{3,4}[а-я]?|Ц[ \t]*\d+|спортзал(?: \(поток \d+\))?|уточнить|уточняется)"
 ROOM_SUFFIX = re.compile(rf"(?:^|[\s·,:-])(?P<room>{ROOM_LABEL})$", re.IGNORECASE)
 ROOM_CORRECTION = re.compile(rf"\s*-\s*(?P<room>{ROOM_LABEL})(?=\s|$)", re.IGNORECASE)
 TEACHER_SEPARATOR = re.compile(r"[ \t]{2,}(?![^()]*\))")
+TEACHER_ROOM_SEPARATOR = re.compile(
+    rf"(?<!\w)(?P<room>{ROOM_LABEL})[ \t]*,[ \t]*(?=[^\W\d_])(?![^()]*\))", re.IGNORECASE,
+)
+JOINED_TEACHERS = re.compile(r"(?<=[А-ЯЁӘІҢҒҮҰҚӨҺ]\.)(?:[ \t]+-?|-[ \t]*)(?=[^\W\d_]+[ \t]+[^\W\d_]\.)")
+UNKNOWN_ROOMS = {"", "уточнить", "уточняется"}
 
 
 class ScheduleError(ValueError):
@@ -335,10 +340,7 @@ def read_semester_period(upper, lower, number, result, source, groups, weekdays,
 
 def semester_entries(lesson_text, teacher_text, room_text):
     subject_rows = [list(semester_subjects(line)) for line in str(lesson_text).split("\n")]
-    teacher_rows = [
-        [teacher_and_room(part) for part in TEACHER_SEPARATOR.split(line.strip(" \t\r,"))]
-        for line in str(teacher_text or "").split("\n")
-    ]
+    teacher_rows = [semester_teachers(line) for line in str(teacher_text or "").split("\n")]
     room_rows = str(room_text or "").split("\n")
     aligned = len(subject_rows) == len(teacher_rows) and all(
         len(subjects) <= 1 and len(teachers) == 1 for subjects, teachers in zip(subject_rows, teacher_rows)
@@ -346,10 +348,12 @@ def semester_entries(lesson_text, teacher_text, room_text):
     # Several variants can share a physical line after manual edits.
     subjects_in_order = [entry for row in subject_rows for entry in row]
     teachers_in_order = [entry for row in teacher_rows for entry in row if any(entry)]
-    aligned_in_order = len(subjects_in_order) == len(teachers_in_order) and all(
-        not room or not teacher_room or room.casefold() == teacher_room.casefold()
-        for (_, room, _), (_, teacher_room) in zip(subjects_in_order, teachers_in_order)
-    )
+    if len(teachers_in_order) < len(subjects_in_order):
+        expanded = [entry for line in str(teacher_text or "").split("\n")
+                    for entry in semester_teachers(line, expand_joined=True) if any(entry)]
+        if len(expanded) == len(subjects_in_order):
+            teachers_in_order = expanded
+    aligned_in_order = can_align_teachers(subjects_in_order, teachers_in_order)
     ordered_teachers = iter(teachers_in_order)
     teachers_by_room = {}
     for teacher, room in teachers_in_order:
@@ -366,23 +370,55 @@ def semester_entries(lesson_text, teacher_text, room_text):
                 continue
             if aligned:
                 teacher, teacher_room = teacher_rows[index][0]
-                if room and teacher_room and room.casefold() != teacher_room.casefold():
-                    issues.add("кабинеты в строках предмета и преподавателя различаются")
-                room = room or teacher_room
             elif aligned_in_order:
                 teacher, teacher_room = ordered_teacher
-                room = room or teacher_room
             else:
                 candidates = teachers_by_room.get(room.casefold(), ())
                 teacher = next(iter(candidates)) if len(candidates) == 1 else ""
+                teacher_room = ""
                 if not teacher and teacher_text:
                     issues.add("преподавателя для части занятий не удалось сопоставить")
-            if not room and len(room_rows) == len(subject_rows) and len(subjects) == 1:
+            if known_room(room) and known_room(teacher_room) and room.casefold() != teacher_room.casefold():
+                issues.add("кабинеты в строках предмета и преподавателя различаются")
+            if not known_room(room) and (known_room(teacher_room) or not room):
+                room = teacher_room
+            if not known_room(room) and len(room_rows) == len(subject_rows) and len(subjects) == 1:
                 candidate = display_room(room_rows[index])
-                if re.fullmatch(ROOM_LABEL, candidate, re.IGNORECASE):
+                if known_room(candidate) and re.fullmatch(ROOM_LABEL, candidate, re.IGNORECASE):
                     room = candidate
             entries.append((subject, room, teacher, weeks))
     return entries, issues
+
+
+def can_align_teachers(subjects, teachers):
+    if len(subjects) != len(teachers):
+        return False
+    room_pairs = [(room.casefold(), teacher_room.casefold())
+                  for (_, room, _), (_, teacher_room) in zip(subjects, teachers)]
+    shifted_rooms = {teacher_room for room, teacher_room in room_pairs
+                     if room != teacher_room and known_room(teacher_room)}
+    if any(room in shifted_rooms and room != teacher_room for room, teacher_room in room_pairs):
+        return False
+    pairs = [(room, teacher_room) for room, teacher_room in room_pairs if known_room(room) and known_room(teacher_room)]
+    conflicts = [room for room, teacher_room in pairs if room != teacher_room]
+    if not conflicts:
+        return True
+    # Resolve a single discrepancy when another room confirms the order.
+    return len(conflicts) == 1 and any(room == teacher_room for room, teacher_room in pairs)
+
+
+def semester_teachers(line, *, expand_joined=False):
+    line = TEACHER_ROOM_SEPARATOR.sub(r"\g<room>  ", line.strip(" \t\r,"))
+    if expand_joined:
+        line = JOINED_TEACHERS.sub("  ", line)
+    teachers = []
+    for part in TEACHER_SEPARATOR.split(line):
+        teacher, room = teacher_and_room(part)
+        if not teacher and room and teachers and teachers[-1][0] and not teachers[-1][1]:
+            teachers[-1] = (teachers[-1][0], room)
+        else:
+            teachers.append((teacher, room))
+    return teachers
 
 
 def semester_subjects(line):
@@ -394,7 +430,7 @@ def semester_subjects(line):
         cursor = match.end()
         correction = ROOM_CORRECTION.match(line, cursor)
         if correction:
-            room = correction["room"]
+            room = display_room(correction["room"])
             cursor = correction.end()
         flow = re.match(r"[ \t,]*поток\b", line[cursor:], re.IGNORECASE)
         if flow:
@@ -413,14 +449,19 @@ def split_subject_room(text):
         return "", ""
     joint = parts.pop() if len(parts) > 1 and parts[-1].startswith("с ") else ""
     match = ROOM_SUFFIX.search(parts[-1])
-    room = match["room"] if match else ""
+    room = display_room(match["room"]) if match else ""
     if match:
         parts[-1] = parts[-1][:match.start()].strip()
     return " · ".join(part for part in [*parts, joint] if part), room
 
 
 def display_room(value):
-    return re.sub(r"^([0-9]+)\.0$", r"\1", clean(value))
+    text = re.sub(r"^([0-9]+)\.0$", r"\1", clean(value))
+    return re.sub(r"^(Ц)[ \t]+(?=\d+$)", r"\1", text, flags=re.IGNORECASE)
+
+
+def known_room(room):
+    return room.casefold() not in UNKNOWN_ROOMS
 
 
 def teacher_and_room(value):
@@ -429,7 +470,7 @@ def teacher_and_room(value):
         return teacher.strip(), display_room(room)
     match = ROOM_SUFFIX.search(teacher)
     if match:
-        return teacher[:match.start()].rstrip(" :-"), match["room"]
+        return teacher[:match.start()].rstrip(" :-"), display_room(match["room"])
     return teacher, ""
 
 

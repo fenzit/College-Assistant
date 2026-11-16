@@ -17,7 +17,7 @@ from college_bot.bot import create_dispatcher
 from college_bot.broadcasts import Broadcasts
 from college_bot.config import Settings
 from college_bot.database import Database
-from college_bot.schedule import HEADERS, ScheduleError, read_schedule
+from college_bot.schedule import HEADERS, ScheduleError, read_schedule, semester_entries
 
 
 def csv_bytes(*rows):
@@ -97,6 +97,44 @@ class ScheduleTests(unittest.TestCase):
              ("св-22", date(2026, 9, 7), 1, "Русский язык", "Сидоров")],
         )
         self.assertEqual(schedule.warnings, ["1 курс!E5: занятие без номера недели пропущено."])
+
+    def test_semester_import_pairs_joined_teacher_names_and_normalizes_rooms(self):
+        entries, issues = semester_entries(
+            "Практика · Ц2 · нед. 1    Математика · 505 · нед. 2",
+            "Иванов И.И. Петров П.П. · уточнить",
+            "Ц 2   505",
+        )
+        self.assertEqual(
+            entries,
+            [("Практика", "Ц2", "Иванов И.И.", {1}), ("Математика", "505", "Петров П.П.", {2})],
+        )
+        self.assertEqual(issues, set())
+        entries, issues = semester_entries(
+            "Практика · Ц 2 · нед. 1    Математика · 505 · нед. 2",
+            "Иванов И.И. · Ц2, Петров П.П. · 504",
+            None,
+        )
+        self.assertEqual(
+            entries,
+            [("Практика", "Ц2", "Иванов И.И.", {1}), ("Математика", "505", "Петров П.П.", {2})],
+        )
+        self.assertEqual(issues, {"кабинеты в строках предмета и преподавателя различаются"})
+
+        entries, issues = semester_entries(
+            "Практика · нед. 1    Математика · 505 · нед. 2",
+            "Иванов И.И. · 505   Петров П.П. · уточнить",
+            None,
+        )
+        self.assertEqual(entries[1], ("Математика", "505", "Иванов И.И.", {2}))
+        self.assertIn("преподавателя для части занятий не удалось сопоставить", issues)
+
+        entries, issues = semester_entries(
+            "Практика · 505 · нед. 1    Математика · 505 · нед. 2",
+            "Иванов И.И. · 505   Петров П.П.",
+            None,
+        )
+        self.assertEqual(entries[1], ("Математика", "505", "Петров П.П.", {2}))
+        self.assertEqual(issues, set())
 
 
 class TelegramStub(BaseSession):
