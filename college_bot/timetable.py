@@ -14,7 +14,7 @@ from openpyxl.utils.exceptions import InvalidFileException
 
 from .config import Settings
 from .database import Database
-from .schedule import ScheduleError, WEEKDAYS, read_schedule
+from .schedule import SCHEDULE_EXTENSIONS, ScheduleError, WEEKDAYS, read_schedule
 from .ui import BACK, SCHEDULE, TODAY, TOMORROW, WEEK, chunks, keyboard
 
 logger = logging.getLogger(__name__)
@@ -67,9 +67,9 @@ def schedule_router(settings: Settings, db: Database, show_groups) -> Router:
             await message.answer("Нет доступа")
             return
         await state.clear()
-        await message.answer("Пришлите расписание файлом .xlsx или .csv.")
+        await message.answer(f"Пришлите расписание файлом {', '.join(SCHEDULE_EXTENSIONS)}.")
 
-    @router.message(F.document.file_name.lower().endswith((".xlsx", ".csv")))
+    @router.message(F.document.file_name.lower().endswith(SCHEDULE_EXTENSIONS))
     async def upload_schedule(message: Message, bot: Bot):
         if settings.role(message.from_user.id) != "admin":
             await message.answer("Нет доступа")
@@ -103,17 +103,23 @@ def schedule_router(settings: Settings, db: Database, show_groups) -> Router:
 
 def format_timetable(name, days, first, last) -> str:
     sections = [name]
+    statuses = {day.status for day in days.values()}
+    shared_status = next(iter(statuses)) if len(statuses) == 1 else ""
+    if shared_status:
+        sections[0] += f"\n{shared_status}"
     for offset in range((last - first).days + 1):
         day = first + timedelta(days=offset)
         heading = f"{WEEKDAYS[day.weekday()]}, {day:%d.%m}"
-        lessons = days.get(day.isoformat())
-        if lessons is None:
+        timetable_day = days.get(day.isoformat())
+        if timetable_day and timetable_day.status and timetable_day.status != shared_status:
+            heading += f"\n{timetable_day.status}"
+        if timetable_day is None:
             lines = ["На этот день расписание ещё не загружено."]
-        elif not lessons:
+        elif not timetable_day.lessons:
             lines = ["В этот день занятий нет."]
         else:
             lines = []
-            for lesson in lessons:
+            for lesson in timetable_day.lessons:
                 room = lesson["room"] or "кабинет не указан"
                 teacher = lesson["teacher"] or "преподаватель не указан"
                 lines.append(

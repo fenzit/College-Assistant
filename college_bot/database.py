@@ -1,5 +1,6 @@
 import sqlite3
 from contextlib import closing, contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -7,6 +8,12 @@ from .config import group_key
 from .schedule import Schedule
 
 Directory = Literal["contacts", "faq"]
+
+
+@dataclass
+class TimetableDay:
+    status: str
+    lessons: list[sqlite3.Row] = field(default_factory=list)
 
 
 class Database:
@@ -43,6 +50,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS schedule_days (
                     group_id INTEGER NOT NULL REFERENCES groups(id),
                     day TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT '',
                     PRIMARY KEY (group_id, day)
                 );
                 CREATE TABLE IF NOT EXISTS schedule (
@@ -91,6 +99,9 @@ class Database:
                     status TEXT NOT NULL DEFAULT 'pending'
                 );
             """)
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(schedule_days)")}
+            if "status" not in columns:
+                conn.execute("ALTER TABLE schedule_days ADD COLUMN status TEXT NOT NULL DEFAULT ''")
             conn.execute("UPDATE questions SET status = 'unknown' WHERE status = 'replying'")
 
     def register(self, user_id: int, name: str, role: str) -> None:
@@ -134,7 +145,10 @@ class Database:
             }
             covered = [(group_ids[key], day.isoformat()) for key, day in schedule.coverage]
             conn.executemany("DELETE FROM schedule_days WHERE group_id = ? AND day = ?", covered)
-            conn.executemany("INSERT INTO schedule_days (group_id, day) VALUES (?, ?)", covered)
+            conn.executemany(
+                "INSERT INTO schedule_days (group_id, day, status) VALUES (?, ?, ?)",
+                ((group_id, day, schedule.status) for group_id, day in covered),
+            )
             conn.executemany("""
                 INSERT INTO schedule (group_id, day, period, starts_at, ends_at, subject, room, teacher)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -144,10 +158,10 @@ class Database:
                 for lesson in schedule.lessons
             ))
 
-    def timetable(self, group_id: int, first, last) -> dict[str, list[sqlite3.Row]]:
+    def timetable(self, group_id: int, first, last) -> dict[str, TimetableDay]:
         with self.connection() as conn:
             rows = conn.execute("""
-                SELECT days.day, s.period, s.starts_at, s.ends_at, s.subject, s.room, s.teacher
+                SELECT days.day, days.status, s.period, s.starts_at, s.ends_at, s.subject, s.room, s.teacher
                 FROM schedule_days AS days
                 LEFT JOIN schedule AS s ON s.group_id = days.group_id AND s.day = days.day
                 WHERE days.group_id = ? AND days.day BETWEEN ? AND ?
@@ -155,9 +169,9 @@ class Database:
             """, (group_id, first.isoformat(), last.isoformat())).fetchall()
         days = {}
         for row in rows:
-            lessons = days.setdefault(row["day"], [])
+            day = days.setdefault(row["day"], TimetableDay(row["status"]))
             if row["period"] is not None:
-                lessons.append(row)
+                day.lessons.append(row)
         return days
 
     def announcements(self, group_id: int | None) -> list[sqlite3.Row]:

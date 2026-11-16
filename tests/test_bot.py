@@ -1,3 +1,4 @@
+import json
 import unittest
 from datetime import date, datetime
 from io import BytesIO
@@ -68,9 +69,10 @@ class ScheduleTests(unittest.TestCase):
             snapshot = Database(backup)
             first_group, second_group = snapshot.groups()
             days = snapshot.timetable(first_group["id"], first, last)
-            self.assertEqual(days[first.isoformat()], [])
-            self.assertEqual(days[last.isoformat()][0]["subject"], "Практика")
-            self.assertEqual(snapshot.timetable(second_group["id"], first, last)[first.isoformat()][0]["room"], "203")
+            self.assertEqual(days[first.isoformat()].lessons, [])
+            self.assertEqual(days[last.isoformat()].lessons[0]["subject"], "Практика")
+            second_days = snapshot.timetable(second_group["id"], first, last)
+            self.assertEqual(second_days[first.isoformat()].lessons[0]["room"], "203")
 
     def test_semester_grid_uses_group_blocks_and_dated_variants(self):
         book = Workbook()
@@ -235,6 +237,42 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.user_group(30)["name"], "СВ-21")
         await self.feed(30, "СВ-22")
         self.assertEqual(self.db.user_group(30)["name"], "СВ-22")
+
+    async def test_import_semester_json_and_show_draft_timetable(self):
+        await self.feed(10, document=self.document)
+        await self.choose_group(30)
+        entry = {
+            "group": "СВ-21", "day": 0, "slot": 1, "start": "08:00", "end": "09:20",
+            "subject": "Информатика", "room": "201", "teacher": "Уточнить по исходному расписанию",
+            "kind": "ПРАКТИКА", "weeks": [2],
+        }
+        data = {
+            "semesterStart": "2026-08-31", "semesterEnd": "2026-09-11", "weeks": 2,
+            "status": "Проект расписания", "groups": [{"id": "СВ-21"}],
+            "lessons": [entry, {**entry, "day": 5, "subject": "За пределами семестра"}],
+        }
+        document = {**self.document, "file_name": "schedule.json"}
+        self.telegram.blob = json.dumps(data).encode()
+        await self.feed(30, document=document)
+        self.assertEqual(self.telegram.messages(30)[-1], "Нет доступа")
+        await self.feed(10, document=document)
+        self.assertIn("занятий: 1", self.telegram.messages(10)[-1])
+
+        await self.feed(30, "07.09.2026")
+        response = self.telegram.messages(30)[-1]
+        self.assertIn("Проект расписания", response)
+        self.assertIn("[ПРАКТИКА] Информатика, 201, Уточнить по исходному расписанию", response)
+        await self.feed(30, "31.08.2026")
+        self.assertIn("В этот день занятий нет", self.telegram.messages(30)[-1])
+        await self.feed(30, "12.09.2026")
+        self.assertIn("расписание ещё не загружено", self.telegram.messages(30)[-1])
+
+        data["lessons"] = [{**entry, "weeks": [3]}]
+        self.telegram.blob = json.dumps(data).encode()
+        await self.feed(10, document=document)
+        self.assertIn("Расписание осталось прежним", self.telegram.messages(10)[-1])
+        await self.feed(30, "07.09.2026")
+        self.assertEqual(self.telegram.messages(30)[-1], response)
 
     async def test_import_schedule_and_group_broadcast(self):
         await self.feed(30, document=self.document)

@@ -1,4 +1,5 @@
 import csv
+import json
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -11,6 +12,7 @@ from openpyxl.utils import get_column_letter
 from .config import group_key
 
 HEADERS = ("date", "group", "period", "starts_at", "ends_at", "subject", "room", "teacher")
+SCHEDULE_EXTENSIONS = (".xlsx", ".csv", ".json")
 WEEKDAYS = (
     "Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье",
 )
@@ -61,6 +63,7 @@ class Schedule:
     coverage: set[tuple[str, date]] = field(default_factory=set)
     lessons: list[Lesson] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    status: str = ""
 
     def add_group(self, name: str) -> str:
         key = group_key(name)
@@ -79,6 +82,8 @@ def read_schedule(filename: str, content: bytes) -> Schedule:
         first_line = text.splitlines()[0] if text.splitlines() else ""
         delimiter = ";" if first_line.count(";") > first_line.count(",") else ","
         read_table(csv.reader(StringIO(text, newline=""), delimiter=delimiter), result, "CSV")
+    elif suffix == "json":
+        read_semester_json(content, result)
     elif suffix == "xlsx":
         workbook = load_workbook(BytesIO(content), read_only=True, data_only=True, keep_links=False)
         try:
@@ -98,10 +103,78 @@ def read_schedule(filename: str, content: bytes) -> Schedule:
         finally:
             workbook.close()
     else:
-        raise ScheduleError("Поддерживаются файлы .xlsx и .csv.")
+        raise ScheduleError(f"Поддерживаемые файлы: {', '.join(SCHEDULE_EXTENSIONS)}.")
     if not result.coverage:
         raise ScheduleError("В файле нет расписания.")
     return result
+
+
+def read_semester_json(content: bytes, result: Schedule) -> None:
+    try:
+        document = json.loads(content)
+        start = date.fromisoformat(document["semesterStart"])
+        end = date.fromisoformat(document["semesterEnd"])
+        week_count = document["weeks"]
+        span = (end - start).days
+        if (document["semesterStart"] != start.isoformat() or document["semesterEnd"] != end.isoformat()
+                or type(week_count) is not int or not 1 <= week_count <= 53 or span // 7 + 1 != week_count):
+            raise ValueError
+        groups, lessons = document["groups"], document["lessons"]
+        if not isinstance(groups, list) or not groups or not isinstance(lessons, list):
+            raise ValueError
+        result.status = " ".join(json_text(document.get("status", "")).split())
+    except (KeyError, TypeError, ValueError):
+        raise ScheduleError("Некорректный schedule.json. Проверьте даты семестра, группы и занятия.") from None
+
+    # Week 1 starts on semesterStart. Weekday numbers run from Monday (0) to Sunday (6).
+    days = {}
+    for offset in range(span + 1):
+        day = start + timedelta(days=offset)
+        days[offset // 7 + 1, day.weekday()] = day
+    group_ids = {}
+    for number, group in enumerate(groups, start=1):
+        try:
+            name = json_text(group["id"])
+            if not name or group_key(name) in result.groups:
+                raise ValueError
+            key = result.add_group(name)
+        except (KeyError, TypeError, ValueError):
+            raise ScheduleError(f"schedule.json, группа {number}: название пустое или повторяется.") from None
+        group_ids[name] = key
+        result.coverage.update((key, day) for day in days.values())
+
+    for number, item in enumerate(lessons, start=1):
+        try:
+            group = group_ids[json_text(item["group"])]
+            weekday, slot, weeks = item["day"], item["slot"], item["weeks"]
+            if type(weekday) is not int or not 0 <= weekday <= 6 or type(slot) is not int:
+                raise ValueError
+            if not isinstance(weeks, list) or not weeks or any(type(w) is not int or not 1 <= w <= week_count for w in weeks):
+                raise ValueError
+            period, starts_at, ends_at = period_and_time(slot, json_text(item["start"]), json_text(item["end"]))
+            subject = json_text(item["subject"])
+            if not subject:
+                raise ValueError
+            kind = json_text(item.get("kind", ""))
+            if kind and kind != "Занятие":
+                subject = f"[{kind}] {subject}"
+            room = json_text(item.get("room", ""))
+            teacher = json_text(item.get("teacher", ""))
+            source = json_text(item.get("source", ""))
+            if item.get("uncertainWeeks") is True:
+                result.warnings.append(f"{source or f'Занятие {number}'}: проверьте недели занятия.")
+        except (KeyError, TypeError, ValueError):
+            raise ScheduleError(f"schedule.json, занятие {number}: проверьте группу, пару, время и недели.") from None
+        for week in sorted(set(weeks)):
+            day = days.get((week, weekday))
+            if day is not None:
+                result.lessons.append(Lesson(group, day, period, starts_at, ends_at, subject, room, teacher))
+
+
+def json_text(value) -> str:
+    if not isinstance(value, str):
+        raise ValueError
+    return value.strip()
 
 
 def clean(value) -> str:
