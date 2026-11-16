@@ -1,8 +1,11 @@
 import sqlite3
 from contextlib import closing, contextmanager
 from pathlib import Path
+from typing import Literal
 
 from .schedule import Schedule
+
+Directory = Literal["contacts", "faq"]
 
 
 class Database:
@@ -54,6 +57,31 @@ class Database:
                     FOREIGN KEY (group_id, day) REFERENCES schedule_days(group_id, day) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS schedule_by_day ON schedule(group_id, day, period);
+                CREATE TABLE IF NOT EXISTS announcements (
+                    id INTEGER PRIMARY KEY,
+                    text TEXT NOT NULL,
+                    group_id INTEGER REFERENCES groups(id),
+                    author_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    reported INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS deliveries (
+                    announcement_id INTEGER NOT NULL REFERENCES announcements(id),
+                    user_id INTEGER NOT NULL REFERENCES users(telegram_id),
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    PRIMARY KEY (announcement_id, user_id)
+                );
+                CREATE INDEX IF NOT EXISTS deliveries_pending ON deliveries(announcement_id, status, user_id);
+                CREATE TABLE IF NOT EXISTS contacts (
+                    id INTEGER PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    details TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS faq (
+                    id INTEGER PRIMARY KEY,
+                    question TEXT NOT NULL,
+                    answer TEXT NOT NULL
+                );
             """)
 
     def register(self, user_id: int, name: str, role: str) -> None:
@@ -118,3 +146,112 @@ class Database:
             if row["period"] is not None:
                 lessons.append(row)
         return days
+
+    def announcements(self, group_id: int | None) -> list[sqlite3.Row]:
+        with self.connection() as conn:
+            return conn.execute("""
+                SELECT a.text, a.created_at, g.name
+                FROM announcements AS a LEFT JOIN groups AS g ON g.id = a.group_id
+                WHERE a.group_id IS NULL OR a.group_id = ?
+                ORDER BY a.id DESC LIMIT 5
+            """, (group_id,)).fetchall()
+
+    def publish(self, text: str, group_id: int | None, author_id: int) -> int:
+        with self.connection() as conn:
+            announcement_id = conn.execute(
+                "INSERT INTO announcements (text, group_id, author_id) VALUES (?, ?, ?)",
+                (text, group_id, author_id),
+            ).lastrowid
+            cursor = conn.execute("""
+                INSERT INTO deliveries (announcement_id, user_id)
+                SELECT ?, telegram_id FROM users WHERE ? IS NULL OR group_id = ?
+            """, (announcement_id, group_id, group_id))
+            return cursor.rowcount
+
+    def next_announcement(self) -> sqlite3.Row | None:
+        with self.connection() as conn:
+            return conn.execute("""
+                SELECT a.id, a.text, a.author_id, g.name FROM announcements AS a
+                LEFT JOIN groups AS g ON g.id = a.group_id
+                WHERE a.reported = 0 ORDER BY a.id LIMIT 1
+            """).fetchone()
+
+    def claim_delivery(self, announcement_id: int) -> int | None:
+        with self.connection() as conn:
+            row = conn.execute("""
+                UPDATE deliveries SET status = 'sending'
+                WHERE announcement_id = ? AND user_id = (
+                    SELECT user_id FROM deliveries WHERE announcement_id = ? AND status = 'pending'
+                    ORDER BY user_id LIMIT 1
+                )
+                RETURNING user_id
+            """, (announcement_id, announcement_id)).fetchone()
+            return row["user_id"] if row else None
+
+    def finish_delivery(self, announcement_id: int, user_id: int, status: str) -> None:
+        with self.connection() as conn:
+            conn.execute("""
+                UPDATE deliveries SET status = ?
+                WHERE announcement_id = ? AND user_id = ?
+            """, (status, announcement_id, user_id))
+
+    def recover_deliveries(self) -> None:
+        with self.connection() as conn:
+            conn.execute("UPDATE deliveries SET status = 'unknown' WHERE status = 'sending'")
+
+    def delivery_counts(self, announcement_id: int) -> dict[str, int]:
+        with self.connection() as conn:
+            rows = conn.execute("""
+                SELECT status, COUNT(*) AS count FROM deliveries WHERE announcement_id = ? GROUP BY status
+            """, (announcement_id,)).fetchall()
+            return {row["status"]: row["count"] for row in rows}
+
+    def mark_reported(self, announcement_id: int) -> None:
+        with self.connection() as conn:
+            conn.execute("UPDATE announcements SET reported = 1 WHERE id = ?", (announcement_id,))
+
+    def statistics(self) -> tuple[int, list[sqlite3.Row]]:
+        with self.connection() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            rows = conn.execute("""
+                SELECT g.name, COUNT(u.telegram_id) AS count
+                FROM groups AS g LEFT JOIN users AS u ON g.id = u.group_id
+                GROUP BY g.id ORDER BY g.name_key
+            """).fetchall()
+            return total, rows
+
+    def directory(self, kind: Directory) -> list[sqlite3.Row]:
+        query = (
+            "SELECT id, title, details AS body FROM contacts ORDER BY id"
+            if kind == "contacts" else "SELECT id, question AS title, answer AS body FROM faq ORDER BY id"
+        )
+        with self.connection() as conn:
+            return conn.execute(query).fetchall()
+
+    def directory_item(self, kind: Directory, item_id: int) -> sqlite3.Row | None:
+        query = (
+            "SELECT id, title, details AS body FROM contacts WHERE id = ?"
+            if kind == "contacts" else "SELECT id, question AS title, answer AS body FROM faq WHERE id = ?"
+        )
+        with self.connection() as conn:
+            return conn.execute(query, (item_id,)).fetchone()
+
+    def save_directory_item(self, kind: Directory, item_id: int | None, title: str, body: str) -> bool:
+        with self.connection() as conn:
+            if item_id is None:
+                query = (
+                    "INSERT INTO contacts (title, details) VALUES (?, ?)"
+                    if kind == "contacts" else "INSERT INTO faq (question, answer) VALUES (?, ?)"
+                )
+                conn.execute(query, (title, body))
+                return True
+            query = (
+                "UPDATE contacts SET title = ?, details = ? WHERE id = ?"
+                if kind == "contacts" else "UPDATE faq SET question = ?, answer = ? WHERE id = ?"
+            )
+            return conn.execute(query, (title, body, item_id)).rowcount == 1
+
+    def delete_directory_item(self, kind: Directory, item_id: int) -> bool:
+        query = "DELETE FROM contacts WHERE id = ?" if kind == "contacts" else "DELETE FROM faq WHERE id = ?"
+        with self.connection() as conn:
+            return conn.execute(query, (item_id,)).rowcount == 1

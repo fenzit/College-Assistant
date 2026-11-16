@@ -7,7 +7,7 @@ from zipfile import BadZipFile
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatType
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 from openpyxl.utils.exceptions import InvalidFileException
@@ -24,18 +24,15 @@ def schedule_router(settings: Settings, db: Database, show_groups) -> Router:
     router = Router()
     router.message.filter(F.chat.type == ChatType.PRIVATE, F.from_user)
 
-    @router.message(F.text == SCHEDULE)
-    async def show_schedule_menu(message: Message, state: FSMContext):
-        await state.clear()
+    @router.message(StateFilter(None), F.text == SCHEDULE)
+    async def show_schedule_menu(message: Message):
         if db.user_group(message.from_user.id) is None:
             await show_groups(message, "Сначала выберите группу.")
             return
         await message.answer("На какой день показать расписание?", reply_markup=keyboard((TODAY, TOMORROW, WEEK), (BACK,)))
 
-    @router.message(F.text.in_({TODAY, TOMORROW, WEEK}))
-    async def show_schedule(message: Message, state: FSMContext):
-        if await state.get_state() is not None:
-            return
+    @router.message(StateFilter(None), F.text.in_({TODAY, TOMORROW, WEEK}))
+    async def show_schedule(message: Message):
         group = db.user_group(message.from_user.id)
         if group is None:
             await show_groups(message, "Сначала выберите группу.")

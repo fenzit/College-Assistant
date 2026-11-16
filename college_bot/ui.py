@@ -7,7 +7,11 @@ CHANGE_GROUP = "Сменить группу"
 BACK = "Назад"
 CANCEL = "Отмена"
 SCHEDULE = "Расписание"
+ANNOUNCEMENTS = "Объявления"
+CONTACTS = "Контакты"
+FAQ = "Частые вопросы"
 TODAY, TOMORROW, WEEK = "Сегодня", "Завтра", "Неделя"
+TEXT_LIMIT = 3000
 
 
 class GroupChoice(CallbackData, prefix="group"):
@@ -16,7 +20,7 @@ class GroupChoice(CallbackData, prefix="group"):
 
 
 def menu() -> ReplyKeyboardMarkup:
-    return keyboard((SCHEDULE,), (CHANGE_GROUP,))
+    return keyboard((SCHEDULE, ANNOUNCEMENTS), (CONTACTS, FAQ), (CHANGE_GROUP,))
 
 
 def keyboard(*rows: tuple[str, ...]) -> ReplyKeyboardMarkup:
@@ -48,10 +52,10 @@ def group_picker(groups, action: str, page: int = 0, *, everyone: bool = False) 
 
 
 def chunks(text: str, limit: int = 3800):
-    while len(text.encode("utf-16-le")) // 2 > limit:
-        end = limit
-        while len(text[:end].encode("utf-16-le")) // 2 > limit:
-            end -= 1
+    while text_length(text) > limit:
+        end = min(len(text), limit)
+        while text_length(text[:end]) > limit:
+            end -= max(1, (text_length(text[:end]) - limit) // 2)
         split = text.rfind("\n", 0, end + 1)
         if split < end // 2:
             split = end
@@ -59,3 +63,7 @@ def chunks(text: str, limit: int = 3800):
         text = text[split:].lstrip("\n")
     if text:
         yield text
+
+
+def text_length(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2

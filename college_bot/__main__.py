@@ -1,10 +1,12 @@
 import asyncio
 import logging
+from contextlib import suppress
 from logging.handlers import RotatingFileHandler
 
 from aiogram import Bot
 
 from .bot import create_dispatcher
+from .broadcasts import Broadcasts
 from .config import load_settings
 from .database import Database
 
@@ -23,7 +25,14 @@ async def main():
     db = Database(settings.data_dir / "college.sqlite3")
     db.initialize()
     async with Bot(settings.token) as bot:
-        await create_dispatcher(settings, db).start_polling(bot)
+        broadcasts = Broadcasts(db)
+        worker = asyncio.create_task(broadcasts.run(bot))
+        try:
+            await create_dispatcher(settings, db, broadcasts).start_polling(bot, close_bot_session=False)
+        finally:
+            worker.cancel()
+            with suppress(asyncio.CancelledError):
+                await worker
 
 
 if __name__ == "__main__":

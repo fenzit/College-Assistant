@@ -5,13 +5,15 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import SimpleEventIsolation
 from aiogram.types import CallbackQuery, Message
 
+from .broadcasts import Broadcasts, broadcast_router
 from .config import Settings
 from .database import Database
+from .directory import directory_router
 from .timetable import schedule_router
 from .ui import BACK, CANCEL, CHANGE_GROUP, GroupChoice, group_picker, menu
 
 
-def create_dispatcher(settings: Settings, db: Database) -> Dispatcher:
+def create_dispatcher(settings: Settings, db: Database, broadcasts: Broadcasts) -> Dispatcher:
     dp = Dispatcher(events_isolation=SimpleEventIsolation(), settings=settings, db=db)
     router = Router()
     router.message.filter(F.chat.type == ChatType.PRIVATE, F.from_user)
@@ -69,4 +71,6 @@ def create_dispatcher(settings: Settings, db: Database) -> Dispatcher:
 
     dp.include_router(router)
     dp.include_router(schedule_router(settings, db, show_groups))
+    dp.include_router(broadcast_router(settings, db, broadcasts))
+    dp.include_router(directory_router(settings, db))
     return dp
