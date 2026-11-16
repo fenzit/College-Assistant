@@ -2,6 +2,8 @@ import sqlite3
 from contextlib import closing, contextmanager
 from pathlib import Path
 
+from .schedule import Schedule
+
 
 class Database:
     def __init__(self, path: Path):
@@ -34,6 +36,24 @@ class Database:
                     registered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE INDEX IF NOT EXISTS users_group ON users(group_id);
+                CREATE TABLE IF NOT EXISTS schedule_days (
+                    group_id INTEGER NOT NULL REFERENCES groups(id),
+                    day TEXT NOT NULL,
+                    PRIMARY KEY (group_id, day)
+                );
+                CREATE TABLE IF NOT EXISTS schedule (
+                    id INTEGER PRIMARY KEY,
+                    group_id INTEGER NOT NULL,
+                    day TEXT NOT NULL,
+                    period INTEGER NOT NULL,
+                    starts_at TEXT NOT NULL,
+                    ends_at TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    room TEXT NOT NULL,
+                    teacher TEXT NOT NULL,
+                    FOREIGN KEY (group_id, day) REFERENCES schedule_days(group_id, day) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS schedule_by_day ON schedule(group_id, day, period);
             """)
 
     def register(self, user_id: int, name: str, role: str) -> None:
@@ -61,3 +81,40 @@ class Database:
     def set_group(self, user_id: int, group_id: int) -> None:
         with self.connection() as conn:
             conn.execute("UPDATE users SET group_id = ? WHERE telegram_id = ?", (group_id, user_id))
+
+    def replace_schedule(self, schedule: Schedule) -> None:
+        with self.connection() as conn:
+            conn.executemany(
+                "INSERT INTO groups (name_key, name) VALUES (?, ?) ON CONFLICT (name_key) DO NOTHING",
+                schedule.groups.items(),
+            )
+            group_ids = {
+                row["name_key"]: row["id"] for row in conn.execute("SELECT id, name_key FROM groups")
+            }
+            covered = [(group_ids[key], day.isoformat()) for key, day in schedule.coverage]
+            conn.executemany("DELETE FROM schedule_days WHERE group_id = ? AND day = ?", covered)
+            conn.executemany("INSERT INTO schedule_days (group_id, day) VALUES (?, ?)", covered)
+            conn.executemany("""
+                INSERT INTO schedule (group_id, day, period, starts_at, ends_at, subject, room, teacher)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                (group_ids[lesson.group], lesson.day.isoformat(), lesson.period, lesson.starts_at,
+                 lesson.ends_at, lesson.subject, lesson.room, lesson.teacher)
+                for lesson in schedule.lessons
+            ))
+
+    def timetable(self, group_id: int, first, last) -> dict[str, list[sqlite3.Row]]:
+        with self.connection() as conn:
+            rows = conn.execute("""
+                SELECT days.day, s.period, s.starts_at, s.ends_at, s.subject, s.room, s.teacher
+                FROM schedule_days AS days
+                LEFT JOIN schedule AS s ON s.group_id = days.group_id AND s.day = days.day
+                WHERE days.group_id = ? AND days.day BETWEEN ? AND ?
+                ORDER BY days.day, s.period, s.starts_at, s.id
+            """, (group_id, first.isoformat(), last.isoformat())).fetchall()
+        days = {}
+        for row in rows:
+            lessons = days.setdefault(row["day"], [])
+            if row["period"] is not None:
+                lessons.append(row)
+        return days

@@ -1,51 +1,14 @@
 from aiogram import Dispatcher, F, Router
 from aiogram.enums import ChatType
 from aiogram.filters import Command, CommandStart
-from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import SimpleEventIsolation
-from aiogram.types import CallbackQuery, KeyboardButton, Message, ReplyKeyboardMarkup
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import CallbackQuery, Message
 
 from .config import Settings
 from .database import Database
-
-PAGE_SIZE = 12
-CHANGE_GROUP = "Сменить группу"
-BACK = "Назад"
-CANCEL = "Отмена"
-
-
-class GroupChoice(CallbackData, prefix="group"):
-    action: str
-    value: int
-
-
-def menu() -> ReplyKeyboardMarkup:
-    return keyboard((CHANGE_GROUP,))
-
-
-def keyboard(*rows: tuple[str, ...]) -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=text) for text in row] for row in rows],
-        resize_keyboard=True,
-    )
-
-
-def group_picker(groups, action: str, page: int = 0):
-    last_page = max(0, (len(groups) - 1) // PAGE_SIZE)
-    page = min(max(page, 0), last_page)
-    builder = InlineKeyboardBuilder()
-    for group in groups[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]:
-        builder.button(text=group["name"], callback_data=GroupChoice(action=action, value=group["id"]))
-    builder.adjust(2)
-    previous_page = InlineKeyboardBuilder()
-    for label, target in (("‹", page - 1), ("›", page + 1)):
-        if 0 <= target <= last_page:
-            previous_page.button(text=label, callback_data=GroupChoice(action=f"{action}_page", value=target))
-    if previous_page.buttons:
-        builder.row(*list(previous_page.buttons))
-    return builder.as_markup()
+from .timetable import schedule_router
+from .ui import BACK, CANCEL, CHANGE_GROUP, GroupChoice, group_picker, menu
 
 
 def create_dispatcher(settings: Settings, db: Database) -> Dispatcher:
@@ -105,4 +68,5 @@ def create_dispatcher(settings: Settings, db: Database) -> Dispatcher:
         await message.answer("Главное меню", reply_markup=menu())
 
     dp.include_router(router)
+    dp.include_router(schedule_router(settings, db, show_groups))
     return dp
