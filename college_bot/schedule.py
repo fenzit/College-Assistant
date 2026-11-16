@@ -16,10 +16,22 @@ WEEKDAYS = (
 )
 WEEK_LIST = re.compile(r"\s+нед\.\s*(\d+(?:\s*[-–—,]\s*\d+)*)$", re.IGNORECASE)
 GRID_TITLE = re.compile(
-    r"недели\s+(\d+)\s*[-–—]\s*(\d+)\s*·\s*"
+    r"недели\s+(\d+)\s*[-–—]\s*(\d+)\s*[·,]\s*"
     r"(\d{1,2}\.\d{1,2}(?:\.\d{4})?)\s*[-–—]\s*(\d{1,2}\.\d{1,2}\.\d{4})",
     re.IGNORECASE,
 )
+SEMESTER_HEADERS = ("Күні Дни", "Қоңырау уақыты Время звонка", "No ; пары", "Дәрісхана ; Аудитория")
+WEEK_TERM = r"[0-9]{1,2}(?![0-9])(?:\s*[-–—]\s*[0-9]{1,2}(?![0-9]))?"
+WEEK_NOTE = r"(?:\s*,?\s*\((?:разово|разоао|пазово|весь семестр)\)?)?"
+SEMESTER_WEEKS = re.compile(
+    rf"(?:\bнед[.), \t]*|(?<=\s)-(?=[0-9]{{1,2}}\s*[-–—]))"
+    rf"(?P<weeks>{WEEK_TERM}{WEEK_NOTE}(?:(?:\s*,\s*|(?<=\))\s*){WEEK_TERM}{WEEK_NOTE})*)",
+    re.IGNORECASE,
+)
+ROOM_LABEL = r"(?:[0-9]{3,4}[а-я]?|Ц\d+|спортзал(?: \(поток \d+\))?|уточнить|уточняется)"
+ROOM_SUFFIX = re.compile(rf"(?:^|[\s·,:-])(?P<room>{ROOM_LABEL})$", re.IGNORECASE)
+ROOM_CORRECTION = re.compile(rf"\s*-\s*(?P<room>{ROOM_LABEL})(?=\s|$)", re.IGNORECASE)
+TEACHER_SEPARATOR = re.compile(r"[ \t]{2,}(?![^()]*\))")
 
 
 class ScheduleError(ValueError):
@@ -193,18 +205,33 @@ def read_grid(first_row, rows, first_number: int, result: Schedule, source: str)
         if not row:
             continue
         title = title or GRID_TITLE.search(clean(row[0]))
+        if tuple(clean(value) for value in row[:4]) == SEMESTER_HEADERS:
+            read_layout = read_semester_grid
+            headers = row
+            break
         if len(row) > 1 and clean(row[1]).casefold() == "пара":
+            read_layout = read_compact_grid
             headers = row
             break
     else:
-        raise ScheduleError(f"{source}: не найдена строка с заголовком «Пара».")
+        raise ScheduleError(f"{source}: не найдена строка с заголовками расписания.")
     if title is None:
         raise ScheduleError(f"{source}: укажите номера учебных недель и даты в заголовке.")
     try:
         mondays, end = grid_dates(title)
     except ValueError:
         raise ScheduleError(f"{source}: даты и номера учебных недель в заголовке расходятся.") from None
+    read_layout(headers, rows, row_number, result, source, mondays, end)
 
+
+def add_grid_group(result, name, mondays, end):
+    key = result.add_group(name)
+    start = next(iter(mondays.values()))
+    result.coverage.update((key, start + timedelta(days=offset)) for offset in range((end - start).days + 1))
+    return key
+
+
+def read_compact_grid(headers, rows, row_number, result, source, mondays, end):
     groups = {}
     for index, header in enumerate(headers[2:], start=2):
         if not clean(header):
@@ -215,10 +242,8 @@ def read_grid(first_row, rows, first_number: int, result: Schedule, source: str)
                 raise ValueError
         except ValueError:
             raise ScheduleError(f"{source}!{get_column_letter(index + 1)}{row_number}: проверьте группу и недели.") from None
-        key = result.add_group(name)
+        key = add_grid_group(result, name, mondays, end)
         groups[index] = key, active_weeks or set(mondays)
-        start = next(iter(mondays.values()))
-        result.coverage.update((key, start + timedelta(days=offset)) for offset in range((end - start).days + 1))
     if not groups:
         raise ScheduleError(f"{source}: нет заголовков групп.")
 
@@ -246,6 +271,166 @@ def read_grid(first_row, rows, first_number: int, result: Schedule, source: str)
                 clean(value), result, location, key, active_weeks, mondays, end,
                 weekday, period, start, finish,
             )
+
+
+def read_semester_grid(headers, rows, row_number, result, source, mondays, end):
+    groups = {}
+    for offset in range(0, len(headers), 5):
+        block = tuple(clean(value) for value in headers[offset:offset + 5])
+        if not any(block):
+            continue
+        if len(block) != 5 or block[:4] != SEMESTER_HEADERS or not block[4]:
+            raise ScheduleError(f"{source}!{get_column_letter(offset + 1)}{row_number}: проверьте заголовки группы.")
+        groups[offset] = add_grid_group(result, block[4], mondays, end)
+
+    weekdays = {}
+    numbered = enumerate(rows, start=row_number + 1)
+    for number, upper in numbered:
+        _, lower = next(numbered, (number + 1, ()))
+        read_semester_period(upper, lower, number, result, source, groups, weekdays, mondays, end)
+
+
+def row_value(row, index):
+    return row[index] if index < len(row) else None
+
+
+def read_semester_period(upper, lower, number, result, source, groups, weekdays, mondays, end):
+    for offset, group in groups.items():
+        weekday = clean(row_value(upper, offset))
+        lesson_text = row_value(upper, offset + 4)
+        location = f"{source}!{get_column_letter(offset + 5)}{number}"
+        try:
+            if weekday:
+                weekdays[offset] = WEEKDAYS.index(weekday.rsplit("/", 1)[-1].strip())
+            if not clean(lesson_text):
+                continue
+            times = clean(row_value(upper, offset + 1)).split()[:2]
+            label = row_value(upper, offset + 2)
+            if clean(label).casefold() == "сроп":
+                numbers = {
+                    row_value(upper, other + 2) for other in groups
+                    if clean(row_value(upper, other + 1)).split()[:2] == times
+                    and isinstance(row_value(upper, other + 2), (int, float))
+                }
+                label = numbers.pop() if len(numbers) == 1 else None
+            period, start, finish = period_and_time(label, *times)
+            entries, issues = semester_entries(lesson_text, row_value(lower, offset + 4), row_value(upper, offset + 3))
+            counts = Counter()
+            for subject, room, teacher, weeks in entries:
+                for week in sorted(weeks):
+                    day = mondays[week] + timedelta(days=weekdays[offset])
+                    if day > end:
+                        issues.add("пары за последней датой семестра пропущены")
+                        continue
+                    result.lessons.append(Lesson(group, day, period, start, finish, subject, room, teacher))
+                    counts[week] += 1
+            overlaps = {week for week, count in counts.items() if count > 1}
+            if overlaps:
+                issues.add(f"несколько занятий на одну пару ({format_weeks(overlaps)})")
+            if issues:
+                result.warnings.append(f"{location}: {'. '.join(sorted(issues))}.")
+        except (KeyError, TypeError, ValueError):
+            raise ScheduleError(f"{location}: проверьте расписание пары, время и номера недель.") from None
+
+
+def semester_entries(lesson_text, teacher_text, room_text):
+    subject_rows = [list(semester_subjects(line)) for line in str(lesson_text).split("\n")]
+    teacher_rows = [
+        [teacher_and_room(part) for part in TEACHER_SEPARATOR.split(line.strip(" \t\r,"))]
+        for line in str(teacher_text or "").split("\n")
+    ]
+    room_rows = str(room_text or "").split("\n")
+    aligned = len(subject_rows) == len(teacher_rows) and all(
+        len(subjects) <= 1 and len(teachers) == 1 for subjects, teachers in zip(subject_rows, teacher_rows)
+    )
+    # Several variants can share a physical line after manual edits.
+    subjects_in_order = [entry for row in subject_rows for entry in row]
+    teachers_in_order = [entry for row in teacher_rows for entry in row if any(entry)]
+    aligned_in_order = len(subjects_in_order) == len(teachers_in_order) and all(
+        not room or not teacher_room or room.casefold() == teacher_room.casefold()
+        for (_, room, _), (_, teacher_room) in zip(subjects_in_order, teachers_in_order)
+    )
+    ordered_teachers = iter(teachers_in_order)
+    teachers_by_room = {}
+    for teacher, room in teachers_in_order:
+        if teacher and room:
+            teachers_by_room.setdefault(room.casefold(), set()).add(teacher)
+
+    entries = []
+    issues = set()
+    for index, subjects in enumerate(subject_rows):
+        for subject, room, weeks in subjects:
+            ordered_teacher = next(ordered_teachers) if aligned_in_order else ("", "")
+            if not weeks:
+                issues.add("занятие без номера недели пропущено")
+                continue
+            if aligned:
+                teacher, teacher_room = teacher_rows[index][0]
+                if room and teacher_room and room.casefold() != teacher_room.casefold():
+                    issues.add("кабинеты в строках предмета и преподавателя различаются")
+                room = room or teacher_room
+            elif aligned_in_order:
+                teacher, teacher_room = ordered_teacher
+                room = room or teacher_room
+            else:
+                candidates = teachers_by_room.get(room.casefold(), ())
+                teacher = next(iter(candidates)) if len(candidates) == 1 else ""
+                if not teacher and teacher_text:
+                    issues.add("преподавателя для части занятий не удалось сопоставить")
+            if not room and len(room_rows) == len(subject_rows) and len(subjects) == 1:
+                candidate = display_room(room_rows[index])
+                if re.fullmatch(ROOM_LABEL, candidate, re.IGNORECASE):
+                    room = candidate
+            entries.append((subject, room, teacher, weeks))
+    return entries, issues
+
+
+def semester_subjects(line):
+    cursor = 0
+    for match in SEMESTER_WEEKS.finditer(line):
+        subject, room = split_subject_room(line[cursor:match.start()])
+        if not subject:
+            raise ValueError
+        cursor = match.end()
+        correction = ROOM_CORRECTION.match(line, cursor)
+        if correction:
+            room = correction["room"]
+            cursor = correction.end()
+        flow = re.match(r"[ \t,]*поток\b", line[cursor:], re.IGNORECASE)
+        if flow:
+            subject += " (поток)"
+            cursor += flow.end()
+        weeks = week_numbers(",".join(re.findall(WEEK_TERM, match["weeks"])))
+        yield subject, room, weeks
+    if line[cursor:].strip(" \t\r,"):
+        subject, room = split_subject_room(line[cursor:])
+        yield subject, room, set()
+
+
+def split_subject_room(text):
+    parts = [part.strip(" \t\r,-–—") for part in text.split("·") if part.strip(" \t\r,-–—")]
+    if not parts:
+        return "", ""
+    joint = parts.pop() if len(parts) > 1 and parts[-1].startswith("с ") else ""
+    match = ROOM_SUFFIX.search(parts[-1])
+    room = match["room"] if match else ""
+    if match:
+        parts[-1] = parts[-1][:match.start()].strip()
+    return " · ".join(part for part in [*parts, joint] if part), room
+
+
+def display_room(value):
+    return re.sub(r"^([0-9]+)\.0$", r"\1", clean(value))
+
+
+def teacher_and_room(value):
+    teacher, dot, room = value.strip(" ,").partition("·")
+    if dot:
+        return teacher.strip(), display_room(room)
+    match = ROOM_SUFFIX.search(teacher)
+    if match:
+        return teacher[:match.start()].rstrip(" :-"), match["room"]
+    return teacher, ""
 
 
 def numbered_rows(first_row, rows, first_number):

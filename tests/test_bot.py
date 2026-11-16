@@ -72,6 +72,32 @@ class ScheduleTests(unittest.TestCase):
             self.assertEqual(days[last.isoformat()][0]["subject"], "Практика")
             self.assertEqual(snapshot.timetable(second_group["id"], first, last)[first.isoformat()][0]["room"], "203")
 
+    def test_semester_grid_uses_group_blocks_and_dated_variants(self):
+        book = Workbook()
+        sheet = book.active
+        sheet.title = "1 курс"
+        sheet.append(["1 СЕМЕСТР (недели 1-3, 31.08.2026–18.09.2026)"])
+        headers = ["Күні Дни", "Қоңырау уақыты Время звонка", "No ; пары", "Дәрісхана ; Аудитория"]
+        sheet.append([*headers, "СВ-21", *headers, "СВ-22"])
+        monday = "Дүйсенбі / Понедельник"
+        sheet.append([
+            monday, "08:00 09:20", 1, "501", "Практика · 501 · нед. 1 (разово) 2(разово)  Математика · 501 · нед. 3",
+            monday, "08:00 09:20", "СРОП", "502", "Русский язык · 502 · нед. 2 (разово)",
+        ])
+        sheet.append([None] * 4 + ["Иванов · 501  Петров -501"] + [None] * 4 + ["Сидоров · 502"])
+        sheet.append([None, "09:30 10:50", 2, 503, "История · 503"])
+        stream = BytesIO()
+        book.save(stream)
+        schedule = read_schedule("schedule.xlsx", stream.getvalue())
+        self.assertEqual(
+            [(lesson.group, lesson.day, lesson.period, lesson.subject, lesson.teacher) for lesson in schedule.lessons],
+            [("св-21", date(2026, 8, 31), 1, "Практика", "Иванов"),
+             ("св-21", date(2026, 9, 7), 1, "Практика", "Иванов"),
+             ("св-21", date(2026, 9, 14), 1, "Математика", "Петров"),
+             ("св-22", date(2026, 9, 7), 1, "Русский язык", "Сидоров")],
+        )
+        self.assertEqual(schedule.warnings, ["1 курс!E5: занятие без номера недели пропущено."])
+
 
 class TelegramStub(BaseSession):
     def __init__(self):
