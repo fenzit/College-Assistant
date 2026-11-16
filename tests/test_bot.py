@@ -141,6 +141,37 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await self.feed(user_id, "/start")
         await self.feed(user_id, callback=f"group:select:{group_id}")
 
+    async def test_schedule_by_typed_date(self):
+        year = datetime.now(self.settings.timezone).year
+        self.telegram.blob = csv_bytes(
+            f"{year}-11-12,СВ-21,1,08:00,09:20,Математика,201,Иванов",
+            f"{year - 1}-11-12,СВ-21,1,08:00,09:20,Практика,202,Петров",
+        )
+        await self.feed(10, document=self.document)
+        await self.choose_group(30)
+        await self.feed(30, "Расписание")
+        await self.feed(30, "12.11")
+        self.assertIn("Математика, 201, Иванов", self.telegram.messages(30)[-1])
+        await self.feed(30, "31.02")
+        self.assertIn("Такой даты нет", self.telegram.messages(30)[-1])
+        await self.feed(30, f"12.11.{year - 1}")
+        self.assertIn("Практика, 202, Петров", self.telegram.messages(30)[-1])
+
+    async def test_choose_and_change_group_by_name(self):
+        await self.feed(10, document=self.document)
+        await self.feed(30, "/start")
+        await self.feed(30, "  св-21  ")
+        group = self.db.user_group(30)
+        self.assertIsNotNone(group)
+        self.assertEqual(group["name"], "СВ-21")
+
+        await self.feed(30, "Сменить группу")
+        await self.feed(30, "СВ-404")
+        self.assertIn("Группа не найдена", self.telegram.messages(30)[-1])
+        self.assertEqual(self.db.user_group(30)["name"], "СВ-21")
+        await self.feed(30, "СВ-22")
+        self.assertEqual(self.db.user_group(30)["name"], "СВ-22")
+
     async def test_import_schedule_and_group_broadcast(self):
         await self.feed(30, document=self.document)
         self.assertEqual(self.telegram.messages(30)[-1], "Нет доступа")

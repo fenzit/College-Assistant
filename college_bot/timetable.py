@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from io import BytesIO
 from xml.etree.ElementTree import ParseError
 from zipfile import BadZipFile
@@ -18,6 +18,7 @@ from .schedule import ScheduleError, WEEKDAYS, read_schedule
 from .ui import BACK, SCHEDULE, TODAY, TOMORROW, WEEK, chunks, keyboard
 
 logger = logging.getLogger(__name__)
+DATE_PATTERN = r"^[0-9]{1,2}\.[0-9]{1,2}(?:\.[0-9]{4})?$"
 
 
 def schedule_router(settings: Settings, db: Database, show_groups) -> Router:
@@ -25,17 +26,21 @@ def schedule_router(settings: Settings, db: Database, show_groups) -> Router:
     router.message.filter(F.chat.type == ChatType.PRIVATE, F.from_user)
 
     @router.message(StateFilter(None), F.text == SCHEDULE)
-    async def show_schedule_menu(message: Message):
+    async def show_schedule_menu(message: Message, state: FSMContext):
         if db.user_group(message.from_user.id) is None:
-            await show_groups(message, "Сначала выберите группу.")
+            await show_groups(message, state, "Сначала выберите группу.")
             return
-        await message.answer("На какой день показать расписание?", reply_markup=keyboard((TODAY, TOMORROW, WEEK), (BACK,)))
+        year = datetime.now(settings.timezone).year
+        await message.answer(
+            f"На какой день показать расписание? Можно ввести дату, например 12.11 или 12.11.{year}.",
+            reply_markup=keyboard((TODAY, TOMORROW, WEEK), (BACK,)),
+        )
 
-    @router.message(StateFilter(None), F.text.in_({TODAY, TOMORROW, WEEK}))
-    async def show_schedule(message: Message):
+    @router.message(StateFilter(None), F.text.in_({TODAY, TOMORROW, WEEK}) | F.text.strip().regexp(DATE_PATTERN))
+    async def show_schedule(message: Message, state: FSMContext):
         group = db.user_group(message.from_user.id)
         if group is None:
-            await show_groups(message, "Сначала выберите группу.")
+            await show_groups(message, state, "Сначала выберите группу.")
             return
         today = datetime.now(settings.timezone).date()
         first = last = today
@@ -44,6 +49,13 @@ def schedule_router(settings: Settings, db: Database, show_groups) -> Router:
         elif message.text == WEEK:
             first = today - timedelta(days=today.weekday())
             last = first + timedelta(days=6)
+        elif message.text != TODAY:
+            day, month, *years = map(int, message.text.strip().split("."))
+            try:
+                first = last = date(years[0] if years else today.year, month, day)
+            except ValueError:
+                await message.answer("Такой даты нет. Проверьте день, месяц и год.")
+                return
         days = db.timetable(group["id"], first, last)
         text = format_timetable(group["name"], days, first, last)
         for part in chunks(text):

@@ -3,6 +3,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Literal
 
+from .config import group_key
 from .schedule import Schedule
 
 Directory = Literal["contacts", "faq"]
@@ -106,6 +107,10 @@ class Database:
     def group(self, group_id: int) -> sqlite3.Row | None:
         with self.connection() as conn:
             return conn.execute("SELECT id, name FROM groups WHERE id = ?", (group_id,)).fetchone()
+
+    def group_by_name(self, name: str) -> sqlite3.Row | None:
+        with self.connection() as conn:
+            return conn.execute("SELECT id, name FROM groups WHERE name_key = ?", (group_key(name),)).fetchone()
 
     def user_group(self, user_id: int) -> sqlite3.Row | None:
         with self.connection() as conn:

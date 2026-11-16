@@ -35,7 +35,7 @@ def question_router(settings: Settings, db: Database, show_groups) -> Router:
     async def ask(message: Message, state: FSMContext):
         group = db.user_group(message.from_user.id)
         if group is None:
-            await show_groups(message, "Сначала выберите группу.")
+            await show_groups(message, state, "Сначала выберите группу.")
             return
         await state.set_state(QuestionFlow.ask)
         await message.answer("Напишите вопрос преподавателю.", reply_markup=keyboard((CANCEL,)))
@@ -50,7 +50,7 @@ def question_router(settings: Settings, db: Database, show_groups) -> Router:
         group = db.user_group(user_id)
         if group is None:
             await state.clear()
-            await show_groups(message, "Сначала выберите группу.")
+            await show_groups(message, state, "Сначала выберите группу.")
             return
         recipients = settings.question_recipients(group["name"])
         question_id = db.create_question(user_id, recipients[0], text)
