@@ -1,0 +1,5 @@
+**
+!requirements.txt
+!college_bot/
+!college_bot/**
+**/__pycache__/

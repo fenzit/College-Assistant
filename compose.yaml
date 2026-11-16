@@ -1,0 +1,13 @@
+services:
+  bot:
+    build: .
+    env_file: .env
+    environment:
+      DATA_DIR: /var/lib/college-bot
+    volumes:
+      - college-data:/var/lib/college-bot
+    init: true
+    restart: unless-stopped
+
+volumes:
+  college-data:
